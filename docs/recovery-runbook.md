@@ -165,14 +165,33 @@ current GPT / 2 create blank"* prompt. **Never answer 2**, and never use `z`.
 Without that leading `1`, gdisk eats your `r` and dumps you in the menu.
 
 **If the disk was expanded in VMware**, the backup GPT is at the *original* end,
-not the device end, and gdisk finds nothing. Detect it: LVM `PSize` + partition
-offsets will be smaller than the disk. Cap a loop device at the original size so
-the backup lands at its end:
+not the device end, and gdisk finds nothing — so an expanded disk is easy to
+mistake for an MBR disk with nothing to recover from. Detect it: LVM `PSize` and
+the partition offsets will be smaller than the device.
+
+`tools/find-backup-gpt.sh` locates the original end for you. It reads the last
+ext4 filesystem's own geometry, scans just past it for `EFI PART`, and reports
+the size the GPT believes the disk to be:
+
+```sh
+sh tools/find-backup-gpt.sh /vmfs/volumes/<uuid>/<vm>/<vm>-flat.vmdk.babyk
+```
+
+On one 800 GiB disk that returned exactly 500 GiB, with a self-consistent header
+at LBA 1048575999. Then cap a loop device at that size so the backup lands at
+its end:
 
 ```sh
 losetup --sizelimit <original_bytes> -f --show /dev/sda
 printf '1\nr\nb\nw\nY\n' | gdisk /dev/loopN
+losetup -d /dev/loopN
+partprobe /dev/sda
+sgdisk -e /dev/sda        # move the secondary GPT to the real device end
 ```
+
+The `sgdisk -e` afterwards is what makes the table self-consistent again on the
+enlarged device, and it also releases the extra space for use. `recover-easy-
+path.sh` detects and handles this case without being told.
 
 If there is no backup GPT at all (MBR disk): `testdisk /dev/sda` → Intel →
 Analyse → **Deeper Search** (Quick Search finds nothing because the primary
@@ -271,6 +290,47 @@ try to fix in place.
 
 Worked example: `tools/rebuild-bootable.sh`.
 
+### When the volume is too big to copy
+
+The instruction above — recover onto a fresh disk, never fix in place — assumes
+you have somewhere to put it. On a data volume of a few terabytes you often do
+not, and buying that space mid-incident is not always possible.
+
+The snapshot still solves it, because you can **commit** one. Give it a COW
+store on a scratch disk rather than on swap, verify the repair through the
+snapshot, and only then merge it down:
+
+```sh
+# scratch disk attached as /dev/sdd, formatted and mounted at /mnt/work
+truncate -s 400G /mnt/work/cow.img
+COW=$(losetup -f --show /mnt/work/cow.img)
+SZ=$(blockdev --getsz /dev/sdc)
+dmsetup create snap --table "0 $SZ snapshot /dev/sdc $COW P 8"
+
+e2fsck -fy -b 163840 -B 4096 /dev/mapper/snap
+tune2fs -O ^orphan_file /dev/mapper/snap && e2fsck -fy /dev/mapper/snap
+mount -o ro /dev/mapper/snap /mnt/check      # look before you commit
+```
+
+If it is right, replay the COW into the original:
+
+```sh
+umount /mnt/check
+dmsetup remove snap
+dmsetup create m-snap --table "0 $SZ snapshot-merge /dev/sdc $COW P 8"
+# poll: merge is done when the allocated count falls to the metadata baseline
+dmsetup status m-snap
+dmsetup remove m-snap
+```
+
+An 8 TiB volume merged in under a minute, because only the COW moves — a few
+gigabytes of metadata, not the data. Check `dmsetup status` before starting:
+a snapshot whose COW filled up is invalid, and merging an invalid snapshot is
+not something you want to discover afterwards.
+
+The payoff is that `e2fsck` on an irreplaceable volume stops being a one-way
+door. You can run it, look at the result, and still walk away.
+
 ---
 
 ## 7. Finding the right ext4 backup superblock
@@ -312,6 +372,55 @@ the partition start).
   (`192.0.2.90-prod app 04`). Use `while IFS= read -r`.
 - **`losetup --sizelimit`** is the clean way to hide the appended key bytes when
   working on a raw `.babyk` without a descriptor.
+- **A repaired ext4 volume that still will not mount.** `e2fsck` finishes, the
+  filesystem reports clean, and `mount` fails with
+  `ext4_init_orphan_info: orphan file block N: bad magic`. `e2fsck` rebuilt
+  ext4's optional `orphan_file` using block bitmaps that are garbage in the
+  destroyed groups, so every block it allocated was out of range — the log is
+  full of `Illegal block number: 3614656343` on a 900 GiB volume. The feature is
+  a performance optimisation, not your data:
+
+  ```sh
+  tune2fs -O ^orphan_file /dev/sdXN
+  e2fsck -fy /dev/sdXN
+  mount -o ro /dev/sdXN /mnt
+  ```
+
+  Worth knowing because at that point the volume looks unrecoverable and it is
+  completely intact. It hit both data volumes of one guest.
+- **Ubuntu puts the LVM PV on a partition typed `8300` "Linux filesystem", not
+  `8e00` "Linux LVM".** Selecting the root device by GPT type code therefore
+  picks the raw PV, and the mount fails with
+  `unknown filesystem type 'LVM2_member'`. Detect LVM at runtime with
+  `pvs <partition>` instead of trusting the type.
+- **Never stack a loop device over a partition the kernel can already see.** LVM
+  then finds the same PV twice and refuses:
+  `Cannot activate LVs in VG <vg> while PVs appear on duplicate devices`. The LV
+  node is never created and the mount fails with `Can't lookup blockdev`. Use
+  the partition directly when the GPT is readable; the loop is only for when the
+  partition table is destroyed.
+- **`umount /mnt/sys` is not enough after a chroot.** The bind-mounted `/sys`
+  holds a nested `efivarfs`, which keeps the mountpoint busy and silently blocks
+  `vgchange -an` afterwards. Use `umount -R`.
+- **Free-block counts read from a backup superblock are stale.** Two volumes
+  looked ~95% empty from their backups and actually held 577 GiB and 6.1 TiB.
+  Only trust the figures `e2fsck` prints after a full check — the difference
+  decides whether the data fits on the disk you were about to copy it to.
+- **A guest with damaged data volumes will not finish booting.** Non-root
+  filesystems in `fstab` with an fsck pass of 1 or 2 are required mounts;
+  systemd waits for them, `fsck` fails against a destroyed superblock, and the
+  guest drops to an emergency shell. Add `nofail` and set the pass to `0` so it
+  boots, then repair and mount the volumes by hand on the running system:
+
+  ```
+  /dev/sdb1  /data  ext4  defaults,nofail,x-systemd.device-timeout=10  0 0
+  ```
+
+- **Docker bind mounts resolve at container start.** If containers came up
+  before you mounted a recovered volume, they are bound to whatever empty
+  directory existed underneath and will keep serving nothing until restarted.
+  `docker restart $(docker ps -q)` is enough; the containers do not need
+  recreating.
 
 ---
 
@@ -370,6 +479,21 @@ A few cases worth flagging when you meet them:
   end, not the device end — see §4.4 for the loop-device trick.
 - **Template VMs** are worth recovering early: they are small, and a working
   template speeds up every clean rebuild that follows.
+- **A guest that was suspended** when the encryptor ran has a `.vmss` pointing
+  at a `.vmem` that is now encrypted, so resume can never succeed and ESXi asks
+  whether to preserve or discard the state. Discard: the memory image is
+  ciphertext, and preserving it only leaves the VM unbootable.
+  `tools/fix-suspended-vms.sh` finds them and cold-boots them from disk.
+- **A VM with disks on several datastores** has one folder *per datastore, all
+  with the same name*. Any tool that resolves a guest by folder name will pick
+  whichever datastore it walked first, which is not necessarily the one holding
+  the system disk. Address those by full path.
+- **A folder with no `.vmx`** can still have its disk repaired, but there is
+  nothing to boot until you build a VM shell around it. Usually templates and
+  scratch VMs; decide early whether they are worth the effort.
+
+Once the fleet is sorted, [`batch-recovery.md`](batch-recovery.md) covers doing
+the class-B guests together rather than one at a time.
 
 ---
 
@@ -401,17 +525,34 @@ during hours of root access.
 docs/
   analysis.md                   damage model, crypto assessment, hardening
   recovery-runbook.md           this file — the operational procedure
+  batch-recovery.md             doing a whole fleet instead of one guest
+  environment-gotchas.md        ESXi shell limits, SSH, workstation traps
   rescue-vm-guide.md            ISO choice, click-by-click UI, console commands
   iocs.md                       indicators on their own, for a detection stack
+  case-media-server.md          a hard-path recovery, start to finish
 tools/
+  esxi-recon.sh                 host triage: IOCs, datastores, pass counts
   make-descriptors.sh           descriptor generator, pure shell (nothing to upload)
   make_descriptors.py           same, Python
   babuk_triage.py               classify files, measure surviving plaintext
   babuk_mapdisk.py              map one disk via backup GPT / backup VBR
   babuk_fleetscan.py            fleet-wide survivability scan
   find_fs.py                    locate ext4/XFS/btrfs/LUKS/LVM when the head is gone
+  find-backup-gpt.sh            find the backup GPT on a disk expanded in VMware
+  remaining-report.sh           what is left, power-state aware
+  recover-easy-path.sh          the easy path, automated end to end
+  repair-ubuntu-efi.sh          the same by hand, as a worked example
   rebuild-bootable.sh           hard path: reassemble lost+found onto a new disk
-  repair-ubuntu-efi.sh          easy path: GPT + ESP + GRUB (EFI)
+  make-rescue-vm.sh             provision one rescue VM around one disk
+  make-batch-rescue-vm.sh       provision one rescue VM around many disks
+  batch-repair.sh               drive the repair across every attached disk
+  bringup-recovered-vm.sh       repoint the vmx, register, boot one guest
+  bringup-sequential.sh         the same for a list, one at a time
+  fix-suspended-vms.sh          guests suspended with an encrypted .vmem
+  final-status.sh               per-VM power/tools/IP table
+  esxi_run.py                   run a command or script on a host (stdlib only)
+  batch_driver.py               push manifest + scripts, run the batch, poll it
+  windows/                      PowerShell helpers for password-only access
 examples/
   fleet-inventory.sample.csv    the shape of a fleetscan CSV
 ```
