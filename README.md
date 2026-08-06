@@ -374,6 +374,21 @@ fleets ran. The disk-level work applies to any guest. Where a VM was Windows, th
 notes send you to R-Studio, DMDE or UFS Explorer rather than pretending Linux
 tooling will read a damaged NTFS volume properly.
 
+**No Windows guest was recovered here.** Every guest in these incidents was
+Ubuntu or Debian. The disk-level work applies unchanged to a Windows VM, and
+mapping showed the NTFS boot sector surviving in the last sector of the
+partition with `$MFT` well past the damage — so the file table is very likely
+intact — but reading it is a job for R-Studio, DMDE or UFS Explorer, and none of
+that is tested here. See [docs/analysis.md](docs/analysis.md) for the full list
+of what this does and does not cover.
+
+**Contributions welcome**, and a Windows/NTFS recovery is the largest gap. So is
+XFS or btrfs, and any locker with a different damage size — the technique holds
+for anything that stops early in a file, only the constant changes. Two
+conditions, both in [CLAUDE.md](CLAUDE.md): host-side tools stay POSIX shell and
+Python standard library, and victim-side detail never reaches git history. CI
+enforces the mechanical half of that.
+
 Hashes, contacts and the attacker's master public key are published on purpose;
 that is what makes an IOC list useful. Host addresses, VM names and credentials
 from the incidents are not, for reasons that should be obvious.

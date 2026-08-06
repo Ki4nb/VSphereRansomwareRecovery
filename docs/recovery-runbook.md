@@ -621,6 +621,8 @@ tools/
   windows/                      PowerShell helpers for password-only access
 examples/
   fleet-inventory.sample.csv    the shape of a fleetscan CSV
+  vmlist.sample.txt             VM list for the batch tools
+  manifest.sample.txt           SCSI-unit-to-guest map, and why it exists
 ```
 
 ---
