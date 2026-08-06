@@ -438,6 +438,60 @@ VM** — check whether fstab has a `/boot/efi` line:
 set the new VM's MAC to match or delete the `match:` block, otherwise the VM
 boots with no network.
 
+### Confirming it actually worked
+
+Recovery fails quietly more often than it fails loudly. Two real cases: a
+partition table that `sgdisk` refused to write, so the volume never mounted and
+the empty directories the container runtime had created underneath looked
+exactly like recovered data; and volumes that mounted correctly while the
+application kept serving nothing, because its bind mounts had resolved before
+the mount existed. Both looked like success.
+
+Check the thing itself, not the absence of an error message.
+
+**The write reached the disk, not a redo log.** In non-persistent mode writes
+succeed and are discarded, so this is the only way to tell:
+
+```sh
+ls -la /vmfs/volumes/<ds>/<vm>/<vm>-flat.vmdk.babyk   # mtime must have moved
+ls /vmfs/volumes/<ds>/<vm>/ | grep -i redo             # must be empty
+```
+
+**The partition table is real.**
+
+```sh
+sgdisk -v /dev/sdX                       # "No problems found"
+dd if=/dev/sdX bs=512 skip=1 count=1 | head -c 8   # "EFI PART"
+```
+
+**The filesystem is mounted, and it is the right one.** A mountpoint that exists
+is not a mountpoint that is mounted:
+
+```sh
+findmnt /data                            # nothing = it is NOT mounted
+df -h /data                              # usage should match what e2fsck reported
+```
+
+If `df` shows a few kilobytes where you expect hundreds of gigabytes, you are
+looking at a directory on the root filesystem, not at the recovered volume.
+
+**The guest came up.** `vim-cmd vmsvc/get.guest <vmid>` should report
+`toolsStatus = "toolsOk"` and the address you expect. A guest with no
+`open-vm-tools` will never report either, so fall back to reaching it over the
+network rather than assuming failure.
+
+**The workload can see the data.** This is the one people skip. Ask the
+application, not the filesystem:
+
+```sh
+docker inspect $(docker ps -q) | grep -oE '"Source": "/[^"]*"' | sort -u
+docker exec <container> ls <mount-point-inside-container>
+```
+
+Bind mounts resolve at container start. If the containers were running before
+you mounted the volume, restart them — `docker restart $(docker ps -q)` — and
+check again.
+
 ---
 
 ## 10. Sorting the fleet before you start
@@ -473,8 +527,20 @@ A few cases worth flagging when you meet them:
 - **An unrecognised partition type with a damaged head** is not necessarily
   lost — run `find_fs.py` before concluding anything. It scans for ext4/XFS/
   btrfs/LUKS/LVM signatures and back-calculates the true filesystem start.
-- **Appliance VMs** (routers, firewalls) are frequently MBR with no backup GPT.
-  They are also usually faster to rebuild from a config export than to recover.
+- **Appliance VMs** (routers, firewalls) are frequently MBR with no backup GPT,
+  and they usually have a **tiny system disk** — often well under 512 MiB, which
+  puts the whole thing inside the damage. One router's 60 MiB system disk was
+  encrypted end to end and is unrecoverable at any price, while its 10 GiB
+  second disk turned out to be a whole-disk ext4 filesystem with everything
+  intact past the damage line.
+
+  So answer the two questions separately. *The appliance* is usually gone, and
+  rebuilding it from a config export takes minutes against hours of carving.
+  *The data on its second disk* may be perfectly recoverable, and it is worth
+  checking before anyone writes the VM off wholesale. Look for filesystem
+  signatures past 512 MiB with `find_fs.py` rather than assuming a proprietary
+  appliance means a proprietary filesystem — the OS disk and the data disk are
+  often not the same kind of thing at all.
 - **A disk that was expanded in VMware** has its backup GPT at the *original*
   end, not the device end — see §4.4 for the loop-device trick.
 - **Template VMs** are worth recovering early: they are small, and a working

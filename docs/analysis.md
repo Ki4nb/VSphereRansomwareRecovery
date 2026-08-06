@@ -250,6 +250,62 @@ loud and both are close to zero in day-to-day use.
 **Rebuild guests from clean images** where you can, rather than carrying an OS
 forward that had an attacker sitting on it for hours.
 
+## What this analysis does not cover
+
+Worth stating plainly, because the gaps are as useful to know as the findings.
+
+**No Windows guest was recovered.** Every guest in these incidents was Ubuntu or
+Debian, so the entire guest-side procedure is written and tested against Linux.
+The disk-level work — the 512 MiB damage model, rebuilding a GPT from its
+backup, the descriptor trick — is filesystem-agnostic and applies unchanged to a
+Windows VM. What is *not* tested here is everything above that line.
+
+The encouraging part is measured rather than assumed. On the NTFS guests that
+were mapped but not recovered, the boot sector had a surviving copy in the last
+sector of the partition, and `$MFT` sat around 3 GiB in — well past the damage.
+`babuk_mapdisk.py` reports both. So the file table and the directory structure
+are very likely intact, and the job is reading them.
+
+For that, use Windows tooling: **R-Studio**, **DMDE** or **UFS Explorer**,
+pointed at the recovered descriptor or a loop device. Do not expect Linux NTFS
+tooling to do a good job of a volume whose head is destroyed. Beyond that
+recommendation this repository has nothing to offer a Windows guest, and saying
+so is more useful than inventing a procedure nobody has run.
+
+**Initial access is inferred from one host.** The first host had gone roughly two
+years without patching, which is a sufficient explanation and very likely the
+right one. Three further hosts in the same estate were compromised by the same
+actor, but by the time they were examined all three had been reinstalled — they
+were running current builds with the encryptor already removed — so the build
+they were running when they were hit is simply unknown. Treat "unpatched
+hypervisor" as the demonstrated cause on one host and the reasonable working
+assumption on the others, not as a measured result across four.
+
+**Scope observation worth having:** the actor took the whole estate, including
+the vCenter appliance itself. That has an operational consequence people hit
+immediately and rarely anticipate — with vCenter gone, every surviving guest's
+`ethernet0.dvs.*` distributed-portgroup binding no longer resolves, and the VMs
+come up with a NIC that silently fails to attach. Plan for standard portgroups
+during recovery regardless of what the estate looked like before.
+
+## Contributing
+
+If you recover something this repository does not cover, please open a pull
+request. The gaps above are the obvious places to start:
+
+- a **Windows/NTFS** guest recovered end to end, which is the largest hole here;
+- a guest on **XFS or btrfs**, where the backup-superblock story is different;
+- any locker with a **different damage size** — the technique holds for anything
+  that stops early in a file, only the constant changes;
+- an ESXi build or vSphere version where the tooling behaves differently.
+
+Two conditions, both in [`CLAUDE.md`](../CLAUDE.md). Keep host-side tools to
+POSIX shell and the Python standard library, because they run where nothing can
+be installed. And sanitize before your first commit: attacker-side detail is the
+point, victim-side detail — addresses, VM names, hostnames, MACs, datastore
+UUIDs, credentials — must never reach git history, which is permanent. CI checks
+the mechanical parts of that, but it cannot catch everything.
+
 ## Sources
 
 - [Kudelski Security — Dissecting and Detecting Babuk Ransomware Cryptography](https://kudelskisecurity.com/research/dissecting-and-detecting-babuk-ransomware-cryptography/)
