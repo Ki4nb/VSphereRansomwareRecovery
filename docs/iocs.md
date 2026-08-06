@@ -1,19 +1,37 @@
 # Indicators
 
-From one host, August 2026. Take the behavioural section more seriously than the
-hashes: this is somebody's private build of leaked source, so the next one
+From four hosts, August 2026. Take the behavioural section more seriously than
+the hashes: this is somebody's private build of leaked source, so the next one
 compiles to a different hash and does the same things.
+
+That is not a hypothetical. Two builds have now been seen from this actor, and
+the difference between them changes how much of your data is damaged.
 
 ## Hashes
 
 ```
-SHA-256  517689b6c377e7622842686dadf8637b4d0690a548bc7afa89d121b0e1027164  encryptor (ELF, 70720 bytes)
-SHA-256  22dd384d6f1a21bb0b2ea7d6570774e895e4ca68d2f68a1551fc07c0ec340aca  run.sh (2610 bytes)
+SHA-256  517689b6c377e7622842686dadf8637b4d0690a548bc7afa89d121b0e1027164  encryptor build A (ELF, 70720 bytes)
+SHA-256  84f0ce0c05d301e25d72a75fa282cfa2848d68921bdac613df06e19cdc182ffa  encryptor build B (ELF, 70720 bytes)
+SHA-256  22dd384d6f1a21bb0b2ea7d6570774e895e4ca68d2f68a1551fc07c0ec340aca  run.sh (2610 bytes) - IDENTICAL for both
 ```
 
-Neither appears in any public index at time of writing, and neither does the
-master public key below. That rules out the named Babuk descendants whose
-private keys have been recovered, and rules in somebody compiling the 2021
+The orchestration script is byte-for-byte the same across both builds. The
+encryptor is not, and the same size means nothing — the two differ in the one
+constant that matters:
+
+| Build | Damage per file | Ransom note, qTox IDs, onion, master key |
+|---|---|---|
+| A | `0x20000000` — 512 MiB | identical |
+| B | `0x20800000` — **520 MiB** | identical |
+
+Same actor, same infrastructure, same script, 8 MiB more destruction. **Measure
+the boundary per incident** with `tools/measure-boundary.py` rather than
+assuming either value. Assuming 512 MiB against build B reports 8 MiB of real
+damage as intact plaintext, which is the direction that loses data.
+
+None of these hashes appears in any public index at time of writing, and neither
+does the master public key below. That rules out the named Babuk descendants
+whose private keys have been recovered, and rules in somebody compiling the 2021
 source leak themselves.
 
 ## On the host
@@ -83,12 +101,68 @@ Zero encrypted is not a failure. It skipped everything because the files already
 carried the `.babyk` extension. Anything you restore afterwards will not be
 skipped.
 
+## How they got in
+
+Initial access in these incidents is attributed to **CVE-2026-59309**, a
+vulnerability in VMware ESXi. That attribution comes from the affected
+organisation and its incident response, not from anything recoverable on the
+hosts themselves — so treat it as the reported vector and check your own
+evidence rather than assuming it applies to you.
+
+What the hosts *do* independently show is an environment that would fall to any
+remote ESXi vulnerability:
+
+```
+VMware ESXi 7.0.3 build-19482537        7.0 Update 3c, March 2022
+```
+
+Both hosts ran that build, roughly three and a half years without a patch at the
+time of the attack. Both had the CIM services enabled (`CIMHttpServer`,
+`CIMHttpsServer`, `CIMSLP`), which is the historical entry point for this whole
+family of ESXi lockers and is off by default on current builds. And as noted
+below, `execInstalledOnly` does not exist on this build at all, so the platform's
+own guard against running an unsigned binary was never available.
+
+Two host-level observations worth repeating because they generalise:
+
+- **The encryptor re-ran days after the initial attack.** On both hosts,
+  `/tmp/script_output_*.txt` carried timestamps from the morning responders were
+  already working the incident. It reported zero files encrypted — because they
+  all already carried the extension — but persistence was live the whole time.
+  Check the mtimes on those files, not just their presence.
+- **Account inventory differed between hosts.** One had only the stock
+  `root`/`dcui`/`vpxuser`; the other had three additional accounts, one with full
+  Admin. Neither state proves anything on its own. Compare hosts against each
+  other and against what the owner expects, and treat an unexplained admin
+  account as unexplained until somebody names it.
+
+Patch level, SLP/CIM exposure and management-network reachability are the three
+things worth fixing before anything is restored, whatever the entry vector turns
+out to have been.
+
 ## Behaviour worth alerting on
 
 - **`execInstalledOnly` set to 0.** ESXi's guard against unsigned binaries. The
   malware cannot run until this is off, and nothing in normal administration
   turns it off. Cheapest high-signal rule available:
   `esxcli system settings advanced set -o /User/execInstalledOnly -i 0`
+
+  **On older builds the setting does not exist at all**, and then this indicator
+  never fires. On ESXi 7.0.3 build-19482537 the attacker's own captured output
+  reads:
+
+  ```
+  Unable to find option execInstalledOnly
+   [NoMatchError]
+  ```
+
+  Their attempt to disable it failed because there was nothing to disable. Do
+  not read a missing alert as a clean host — and note the corollary for
+  responders, which cost time in one of these incidents: running
+  `esxcli system settings kernel set -s execInstalledOnly -v TRUE` as a hardening
+  step on such a build **silently does nothing**. Check
+  `esxcli system settings kernel list -o execInstalledOnly` afterwards and
+  confirm `Configured` actually changed.
 - **`esxcli vm process kill -t force` in a loop**, over every world ID, skipping
   anything matching `vcls`, `vcenter` or `vcsa`.
 - **`esxcli software vib remove -n vmware-fdm`**, uninstalling the HA agent.
@@ -104,8 +178,10 @@ skipped.
 - Files grow by exactly 32 bytes per pass. VMFS flat files are 512-byte aligned,
   so `size % 512` gives you the pass count directly: 0 never encrypted, 32 once,
   64 twice.
-- Damage stops at exactly `0x20000000`, every time. Zero-density sampling shows
-  uniform random below the line and normal data above it.
+- Damage stops at exactly one offset and stops dead — `0x20000000` for build A,
+  `0x20800000` for build B. Whichever it is, it is the same on every file on the
+  host, to the sector. Entropy or zero-density sampling shows uniform random
+  below the line and normal data above it. Measure it; do not assume it.
 - Small files are wholly encrypted, large files only at the head.
 - `.vmx` files are not targeted. VM definitions survive, so you can re-register
   guests with `vim-cmd solo/registervm` once the disks are back.

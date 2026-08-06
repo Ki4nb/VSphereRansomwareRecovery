@@ -13,18 +13,23 @@
 #   sh make-descriptors.sh --write /vmfs/volumes/<uuid>    # limit to one volume
 
 MODE=dry
-VOLS=""
+# NB: one volume per LINE, never a space-joined string. Datastores are routinely
+# named things like "DS01 Main Array (1)", and `for v in $VOLS` splits that into
+# three directories that do not exist, so the scan silently finds nothing and
+# reports "descriptors handled: 0" as though the host were clean.
+VOLFILE=/tmp/.mkdesc.vols.$$
+: > "$VOLFILE"
 for a in "$@"; do
   case "$a" in
     --write) MODE=write ;;
-    *) VOLS="$VOLS $a" ;;
+    *) printf '%s\n' "$a" >> "$VOLFILE" ;;
   esac
 done
 
 # Default: every real (non-symlink) volume under /vmfs/volumes
-if [ -z "$VOLS" ]; then
+if [ ! -s "$VOLFILE" ]; then
   for d in /vmfs/volumes/*; do
-    [ -d "$d" ] && [ ! -L "$d" ] && VOLS="$VOLS $d"
+    [ -d "$d" ] && [ ! -L "$d" ] && printf '%s\n' "$d" >> "$VOLFILE"
   done
 fi
 
@@ -87,16 +92,19 @@ mkdesc() {
 }
 
 echo "mode: $MODE"
-echo "volumes:$VOLS"
+echo "volumes:"
+sed 's/^/  /' "$VOLFILE"
 echo
 
 # NOTE: `for f in $(find ...)` would word-split on VM folders containing
 # spaces (e.g. "192.0.2.90-prod app 04"). Read line-by-line instead.
 TMP=/tmp/.mkdesc.list.$$
 : > "$TMP"
-for v in $VOLS; do
+while IFS= read -r v; do
+  [ -n "$v" ] || continue
   find "$v" -type f -name "*-flat.vmdk.babyk" 2>/dev/null >> "$TMP"
-done
+done < "$VOLFILE"
+rm -f "$VOLFILE"
 
 N=0
 while IFS= read -r f; do
@@ -107,4 +115,11 @@ rm -f "$TMP"
 
 echo
 echo "descriptors handled: $N"
-[ "$MODE" = "dry" ] && echo "re-run with --write to create them"
+# NB: this used to be the script's last statement as a bare `[ ... ] && echo`,
+# which exits 1 whenever MODE is write - i.e. every successful run reported
+# failure to any caller using `&&` or `set -e`. Check for a positive marker,
+# not an exit code, is the general rule; here, just exit explicitly.
+if [ "$MODE" = "dry" ]; then
+  echo "re-run with --write to create them"
+fi
+exit 0

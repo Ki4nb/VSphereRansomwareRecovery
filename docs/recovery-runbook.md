@@ -4,18 +4,34 @@ The procedure, in the order you actually do it. Read
 [`analysis.md`](analysis.md) first for why any of this works.
 
 Written for **Ubuntu and Debian** guests, which is where the guest-side detail
-matters. The disk-level technique is OS-independent.
+matters. The disk-level technique is OS-independent. For a **Windows guest**,
+steps 1 to 6 apply unchanged and then you leave this document for
+[`windows-recovery.md`](windows-recovery.md) — NTFS is not repaired here, it is
+routed around, and the route is different enough to deserve its own page.
 
 
 ---
 
 ## 1. The one fact everything rests on
 
-The encryptor destroys **only the first `0x20000000` bytes (512 MiB)** of each
-file, then appends a 32-byte key. Everything past 512 MiB is untouched
-plaintext. **There is no way to decrypt** — Curve25519 ECDH + `/dev/urandom`
-per-file keys, no flaw, no key available. All recovery is about the surviving
-99%.
+The encryptor destroys **only the head of each file**, then appends a 32-byte
+key. Everything past that offset is untouched plaintext. **There is no way to
+decrypt** — Curve25519 ECDH + `/dev/urandom` per-file keys, no flaw, no key
+available. All recovery is about the surviving 99%.
+
+**Measure the offset; do not assume it.** Two builds are known from this actor,
+with a byte-identical `run.sh`: one stops at `0x20000000` (512 MiB), the other
+at `0x20800000` (520 MiB). This document uses 512 MiB throughout because that is
+what the incident it was written from used — substitute your own measurement
+wherever you see it.
+
+```sh
+python3 ../tools/measure-boundary.py /vmfs/volumes/*/*/*-flat.vmdk.babyk
+```
+
+Assuming 512 MiB against the 520 MiB build reports 8 MiB of ciphertext as
+surviving plaintext, which marks a damaged file intact — the only direction of
+error that actually costs data.
 
 **Pass count from file size** (VMFS flat files are always 512-aligned):
 

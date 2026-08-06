@@ -38,16 +38,47 @@ was five disks, about 325 GiB, which needed nothing but a new descriptor file.
 The triple pass has a second consequence. Some files were caught twice, which
 means two layers of encryption on the same 512 MiB and two appended keys.
 
-## The 512 MiB limit
+## The early-stop limit, and why it is not a constant
 
-The encryptor processes `0x20000000` bytes, appends a 32-byte ephemeral public
-key, and moves on. Files smaller than that are entirely encrypted. On this host
-128 files were hit: 94 of them were under 512 MiB and are unrecoverable, and all
-94 were VMDK descriptors, logs and `.nvram` files, every one of which can be
-regenerated. The 34 files over 512 MiB were the actual virtual disks, and they
-lost 512 MiB each out of 6,911.95 GiB total.
+The encryptor processes a fixed number of bytes from the head of each file,
+appends a 32-byte ephemeral public key, and moves on. Files smaller than that
+are entirely encrypted. On the first host 128 files were hit: 94 of them were
+under the limit and are unrecoverable, and all 94 were VMDK descriptors, logs
+and `.nvram` files, every one of which can be regenerated. The 34 files over the
+limit were the actual virtual disks, and they lost 512 MiB each out of 6,911.95
+GiB total.
 
 That works out to 17.02 GiB destroyed and 6,894.93 GiB intact. 99.754%.
+
+**The limit itself varies between builds.** Two are now known from the same
+actor — same `run.sh` byte for byte, same ransom note, same master public key,
+same onion and qTox contacts — differing only here:
+
+| Build | Bytes per file | |
+|---|---|---|
+| A | `0x20000000` | 512 MiB |
+| B | `0x20800000` | **520 MiB** |
+
+Build B was measured on two separate hosts, on four disks, to the sector: the
+last high-entropy sector begins at `0x207FFE00` and clean plaintext resumes at
+`0x20800000`. It was consistent across every file on both hosts.
+
+Eight megabytes sounds like a rounding error and is not. Every offset in this
+repository was originally derived from 512 MiB, and a disk measured with the
+wrong constant reports 8 MiB of ciphertext as surviving plaintext — an error in
+the one direction that costs you data, because it marks a damaged file intact.
+
+So the first thing to establish on any host is the boundary, not the procedure:
+
+```sh
+python3 tools/measure-boundary.py /vmfs/volumes/*/*/*-flat.vmdk.babyk
+```
+
+It finds the transition by entropy without being told what to look for, refines
+to the sector, and warns if two disks on the same host disagree — which would
+mean two builds ran, and each disk then needs its own constant.
+
+Treat `0x20000000` as *an observed case*, not as the family's invariant.
 
 You can see the boundary directly. Sample zero-byte density every 64 KiB;
 ciphertext is uniform random and sits around 250 zeros per 64 KiB, real data is
@@ -217,10 +248,37 @@ VMXNET3 at 9.3. Fixed builds:
 | ESXi 9.0.x | `ESXi-9.0.2.0100-25595025` |
 | ESXi 8.0 | `ESXi80U3k-25595708` or `ESXi80U2f-25626445` |
 
-To be precise about what is being claimed: no specific CVE was tied to this
-intrusion. The finding is the boring one. An internet-reachable hypervisor that
-has not been patched in two years is the precondition, and closing that is what
-removes the risk.
+To be precise about what is being claimed: for the first host, no specific CVE
+was tied to the intrusion. The finding was the boring one. An internet-reachable
+hypervisor that has not been patched in two years is the precondition, and
+closing that is what removes the risk.
+
+### The later hosts, and CVE-2026-59309
+
+For the two hosts recovered in the August 2026 round, initial access is
+attributed to **CVE-2026-59309** — the VMware Directory Service authentication
+bypass listed above at CVSS 9.8. That attribution comes from the affected
+organisation, not from anything recoverable on the hosts, so it is reported
+here as the stated vector rather than as a forensic finding. Nothing in the
+host evidence contradicts it, and nothing in the host evidence proves it either.
+
+What those hosts do show independently is the same precondition as the first:
+
+```
+VMware ESXi 7.0.3 build-19482537        7.0 Update 3c, March 2022
+```
+
+Roughly three and a half years unpatched, with the CIM services (`CIMHttpServer`,
+`CIMHttpsServer`, `CIMSLP`) still enabled. On that build `execInstalledOnly`
+does not exist at all — the attacker's own captured output shows their attempt to
+disable it failing with `Unable to find option execInstalledOnly [NoMatchError]`
+— so the platform guard that the hardening advice below depends on was never
+available to be turned on. That is worth knowing before you write it into a
+runbook: on a host old enough to be vulnerable, the mitigation may not exist.
+
+Whatever the entry vector turns out to be in your case, the same three things
+close it: patch level, SLP/CIM exposure, and whether the management interface is
+reachable at all.
 
 ## What would actually have helped
 
@@ -254,23 +312,24 @@ forward that had an attacker sitting on it for hours.
 
 Worth stating plainly, because the gaps are as useful to know as the findings.
 
-**No Windows guest was recovered.** Every guest in these incidents was Ubuntu or
-Debian, so the entire guest-side procedure is written and tested against Linux.
-The disk-level work — the 512 MiB damage model, rebuilding a GPT from its
-backup, the descriptor trick — is filesystem-agnostic and applies unchanged to a
-Windows VM. What is *not* tested here is everything above that line.
+**Windows is now covered, but only through NTFS.** Two Windows Server 2022
+guests running SQL Server were recovered in August 2026, and the procedure is in
+[windows-recovery.md](windows-recovery.md). The earlier prediction held up
+exactly: the NTFS boot sector survived in the last sector of the partition and
+`$MFT` sat around 3 GiB in, untouched, on every volume examined.
 
-The encouraging part is measured rather than assumed. On the NTFS guests that
-were mapped but not recovered, the boot sector had a surviving copy in the last
-sector of the partition, and `$MFT` sat around 3 GiB in — well past the damage.
-`babuk_mapdisk.py` reports both. So the file table and the directory structure
-are very likely intact, and the job is reading them.
+What was *not* predicted is the part that matters operationally. Restoring the
+boot sector does not make the volume mount, because the root directory's index
+block is also in the damaged head, and Windows reports the result as `RAW` with
+no further detail. The working answer turned out not to be repair at all but
+extraction: every file's `$FILE_NAME` attribute names its parent, so the whole
+tree rebuilds from the MFT with the directory indexes never consulted.
+`tools/ntfs_extract.py` does that, read-only, through the backup boot sector.
 
-For that, use Windows tooling: **R-Studio**, **DMDE** or **UFS Explorer**,
-pointed at the recovered descriptor or a loop device. Do not expect Linux NTFS
-tooling to do a good job of a volume whose head is destroyed. Beyond that
-recommendation this repository has nothing to offer a Windows guest, and saying
-so is more useful than inventing a procedure nobody has run.
+Still untested: ReFS, dynamic disks, Storage Spaces, BitLocker-protected
+volumes, and NTFS with 4 KiB physical sectors. **R-Studio**, **DMDE** and **UFS
+Explorer** remain reasonable commercial alternatives, and for a volume this
+repository does not cover they are still the recommendation.
 
 **Initial access is inferred from one host.** The first host had gone roughly two
 years without patching, which is a sufficient explanation and very likely the
@@ -293,10 +352,11 @@ during recovery regardless of what the estate looked like before.
 If you recover something this repository does not cover, please open a pull
 request. The gaps above are the obvious places to start:
 
-- a **Windows/NTFS** guest recovered end to end, which is the largest hole here;
 - a guest on **XFS or btrfs**, where the backup-superblock story is different;
+- **ReFS, Storage Spaces or BitLocker**, none of which the NTFS work touches;
 - any locker with a **different damage size** — the technique holds for anything
-  that stops early in a file, only the constant changes;
+  that stops early in a file, only the constant changes, and this actor already
+  shipped two builds that differ by 8 MiB;
 - an ESXi build or vSphere version where the tooling behaves differently.
 
 Two conditions, both in [`CLAUDE.md`](../CLAUDE.md). Keep host-side tools to
