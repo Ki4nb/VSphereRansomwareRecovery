@@ -2,8 +2,8 @@
 
 If you found this because your ESXi host is showing a ransom banner, every VM is
 powered off, and your virtual disks now end in `.babyk`: the situation is much
-better than it looks right now. Take the next five minutes to read this before
-you do anything irreversible.
+better than it looks. Take five minutes to read this before you do anything
+irreversible.
 
 Two things are true at once.
 
@@ -13,22 +13,81 @@ implemented correctly. There is no flaw to attack and no key to find. Anyone who
 tells you otherwise is selling something.
 
 **You have probably lost almost nothing.** The encryptor stops after 512 MiB per
-file. In the incident this repository documents, that meant 6,911.95 GiB of
-"encrypted" virtual disks contained 6,894.93 GiB of perfectly readable
-plaintext. 99.754% of the bytes were never touched. Most Linux guests came back
-in under ten minutes each.
+file. In the first incident documented here, 6,911.95 GiB of "encrypted" virtual
+disks contained 6,894.93 GiB of perfectly readable plaintext — 99.754% of the
+bytes were never touched. Most Linux guests came back in under ten minutes each.
+
+Since then the same procedure has recovered **four hosts and around 150 damaged
+disks**, including a fleet of thirty guests brought back in a single pass and a
+6.7 TB media volume whose root directory had been destroyed.
 
 The rest of this is how.
 
 ---
 
+## Run this with an AI agent
+
+**This repository ships an agent skill.** Point Claude Code — or any coding
+agent — at it and you get the whole procedure: triage, the damage model, the
+tooling, and a symptom-to-fix table for the failures that look like total data
+loss and are not.
+
+That last part is why it is worth doing. Several failure modes in this work look
+identical to "your data is gone" while being one command away from readable, and
+an agent that has read the table will not tell you to give up.
+
+### Claude Code
+
+```bash
+git clone https://github.com/Ki4nb/VSphereRansomwareRecovery.git
+cd VSphereRansomwareRecovery
+claude
+```
+
+The skill in `.claude/skills/` is picked up automatically while you work inside
+the repository. To make it available everywhere instead:
+
+```bash
+mkdir -p ~/.claude/skills
+cp -r VSphereRansomwareRecovery/.claude/skills/esxi-ransomware-recovery ~/.claude/skills/
+```
+
+Then just describe the situation — "our ESXi host got hit, the vmdks are all
+.babyk now" — and it will load.
+
+### Any other agent
+
+Codex, Cursor, Copilot, Gemini, or your own harness: clone the repository and
+point the agent at **[`AGENTS.md`](AGENTS.md)**. Many read it automatically.
+Everything is plain Markdown and plain POSIX shell — there is no runtime, no
+plugin and no dependency to install.
+
+```
+You are helping with an ESXi ransomware recovery.
+Read AGENTS.md in this repository first, then
+.claude/skills/esxi-ransomware-recovery/SKILL.md.
+```
+
+### What to expect
+
+It will ask for read-only output before suggesting anything that writes, tell
+you which commands modify what, and refuse to declare data lost before the
+checks that routinely disprove it. Everything with a `--commit` flag is dry-run
+by default.
+
+> An agent is a good pair of hands here and a bad decision-maker. It will move
+> faster than you can check it. Keep damaged disks attached
+> **Independent — non-persistent** until you have seen a dry run you believe.
+
+---
+
 ## Why 512 MiB matters so much
 
-Whoever built this made a speed choice. On a hypervisor you don't need to encrypt
-a 2 TB disk to take it hostage. You only need to destroy the front of it, where
-the partition table and the bootloader live, and then the VM won't boot and the
-disk looks like garbage. So the encryptor writes `0x20000000` bytes, appends a
-32-byte key, and moves to the next file.
+Whoever built this made a speed choice. On a hypervisor you don't need to
+encrypt a 2 TB disk to take it hostage. You only need to destroy the front of
+it, where the partition table and the bootloader live, and then the VM won't
+boot and the disk looks like garbage. So the encryptor writes `0x20000000`
+bytes, appends a 32-byte key, and moves to the next file.
 
 Here is a 100 GiB disk after it ran:
 
@@ -79,35 +138,21 @@ it, mount, copy the data out.
 
 Where does the root filesystem start?
 
-If it starts past 512 MiB, which is what you get from Ubuntu's default guided
-install with LVM (root PV around 2–3 GiB in), the filesystem is completely
-untouched. Nothing is corrupt. You lost the bootloader and nothing else, and you
-are about five commands from having your files back.
+If it starts past 512 MiB — Ubuntu's default guided install with LVM puts the
+root PV around 2–3 GiB in — the filesystem is completely untouched. Nothing is
+corrupt. You lost the bootloader and nothing else, and you are about five
+commands from having your files back.
 
 If it starts at 1 MiB, which is what a plain-ext4 Debian install gives you, then
 the root inode and the first ~131,000 inodes were inside the blast radius. ext4's
 `flex_bg` packs the inode tables for 16 block groups together at the front of the
 filesystem, and unlike superblocks, **inode tables have no backup copies
 anywhere**. The file data is still on the disk. The names and the directory tree
-are not. That guest needs `e2fsck` and then manual reassembly out of
-`lost+found`, which took about two hours in practice.
+are not. That guest needs `e2fsck` and then reassembly out of `lost+found`.
 
 Both are recoverable. One is coffee, the other is an afternoon.
 
 ---
-
-## Where to go next
-
-- **[docs/analysis.md](docs/analysis.md)** — what the malware actually does, step
-  by step, plus the full cryptographic assessment and why the answer on
-  decryption is final.
-- **[docs/recovery-runbook.md](docs/recovery-runbook.md)** — the working
-  procedure. Triage, both recovery paths, and the mistakes that cost hours the
-  first time.
-- **[docs/rescue-vm-guide.md](docs/rescue-vm-guide.md)** — click-by-click in the
-  ESXi web UI, then the console commands. Start here if you want the shortest
-  path to seeing your files listed.
-- **[docs/iocs.md](docs/iocs.md)** — hashes, paths and behavioural indicators.
 
 ## First 15 minutes
 
@@ -124,21 +169,14 @@ ls -l /vmfs/volumes/*/*/*-flat.vmdk.babyk | awk '{print $5 % 512, $NF}'
 
 Do that one first. It is free, and it sometimes ends the job: the attacker's
 script runs the encryptor three times in a row, and any disk still held open by a
-running VM gets renamed without being encrypted. Five disks on the host in this
-incident, around 325 GiB, turned out to be completely intact. They needed a new
-descriptor file and nothing else.
+running VM gets renamed without being encrypted. On one host that was five disks
+and 325 GiB; on another, 33 guests. They needed a new descriptor file and nothing
+else.
 
 ```sh
-# Classify a whole datastore and total up the surviving plaintext
-python3 tools/babuk_triage.py /vmfs/volumes/<uuid> --csv /tmp/triage.csv
-
-# Map one disk: partition table from the backup GPT, filesystems found,
-# and the exact losetup/mount commands for what survived
-python3 tools/babuk_mapdisk.py /vmfs/volumes/<uuid>/<vm>/<vm>-flat.vmdk.babyk
-
-# Generate the descriptors ESXi needs to attach these files as normal disks
-sh tools/make-descriptors.sh            # dry run first
-sh tools/make-descriptors.sh --write
+sh tools/esxi-recon.sh                  # host state, IOCs, datastores, pass counts
+sh tools/make-descriptors.sh --write    # only ever creates new files
+sh tools/remaining-report.sh            # classify the fleet
 ```
 
 ## The descriptor problem, and the trick that solves it
@@ -155,8 +193,7 @@ being 512-byte aligned, which those appended bytes had broken and which quietly
 confuses every recovery tool you will otherwise reach for.
 
 After that, ESXi treats the encrypted file as an ordinary flat disk. Nothing gets
-renamed, copied or modified. `tools/make-descriptors.sh` does the arithmetic for
-every damaged file on the host and refuses to overwrite anything.
+renamed, copied or modified.
 
 ## Four rules that keep this safe
 
@@ -171,7 +208,7 @@ persistence. Confirm the setting in the UI.
 sitting in `/var/run/`, executable. A VM you just restored is a fresh target, and
 this time the new writes land in the first 512 MiB where nothing survives.
 
-**Never run the encryptor to "check" something.** On its final pass in this
+**Never run the encryptor to "check" something.** On its final pass in the first
 incident it reported 0 files encrypted and 916 skipped, which looks harmless
 until you understand it skipped them only because they already had the `.babyk`
 extension. Anything you restore is fair game.
@@ -194,33 +231,73 @@ Every key in that public decryptor exists because someone reported. When an
 actor is eventually arrested and their keys are recovered, victims get matched by
 exactly that value. If yours was never filed, nobody can match it to you.
 
-## About the tools
+**And do not trust "unrecoverable" until you have checked three specific
+things.** Each of these looks exactly like total data loss and is not:
 
-Python 3 standard library and POSIX shell only, because they need to run on the
-ESXi host itself, where you cannot install anything. Everything is read-only
-except the two descriptor generators, which only ever create new files, and the
-two repair scripts, which say so plainly.
+- an LVM root in a rescue environment that lacks `lvm2` reads as unformatted
+  space;
+- a filesystem that refuses to mount with `orphan file block N: bad magic` after
+  a clean `e2fsck` is intact, and one `tune2fs -O ^orphan_file` from readable;
+- a disk reporting "no backup GPT" may have been expanded in VMware, leaving its
+  secondary table stranded mid-device rather than absent.
 
-| Tool | What it does |
-|---|---|
-| `babuk_triage.py` | Walks a datastore, classifies every file, totals the surviving plaintext, confirms the damage boundary by entropy |
-| `babuk_mapdisk.py` | Rebuilds one disk's layout from the backup GPT and backup boot sectors, finds `$MFT` and ext4 backup superblocks |
-| `babuk_fleetscan.py` | Runs the mapper across the whole host, one line per partition, CSV out |
-| `find_fs.py` | Signature scan for ext4/XFS/btrfs/LUKS/LVM when the head is gone and you have no idea where anything starts |
-| `make_descriptors.py`, `make-descriptors.sh` | Generate `-recovered.vmdk` descriptors |
-| `repair-ubuntu-efi.sh` | The easy path, scripted: rebuild GPT, recreate the ESP, reinstall GRUB |
-| `rebuild-bootable.sh` | The hard path, worked through: reassemble `lost+found` onto a fresh disk |
+---
+
+## Documentation
+
+- **[docs/recovery-runbook.md](docs/recovery-runbook.md)** — the working
+  procedure. Triage, both recovery paths, and the mistakes that cost hours.
+- **[docs/batch-recovery.md](docs/batch-recovery.md)** — thirty guests instead
+  of one. One rescue VM, many disks, and how to tell identical clones apart.
+- **[docs/environment-gotchas.md](docs/environment-gotchas.md)** — the ESXi
+  shell, SSH and the workstation. Everything here returns a confident wrong
+  answer rather than an error.
+- **[docs/case-media-server.md](docs/case-media-server.md)** — a hard-path
+  recovery start to finish, including the wrong turns.
+- **[docs/rescue-vm-guide.md](docs/rescue-vm-guide.md)** — click-by-click in the
+  ESXi web UI, then the console commands.
+- **[docs/analysis.md](docs/analysis.md)** — what the malware does, the full
+  cryptographic assessment, and hardening.
+- **[docs/iocs.md](docs/iocs.md)** — hashes, paths and behavioural indicators.
+
+## Tools
+
+Host-side tooling is Python 3 standard library and POSIX shell only, because it
+runs on the ESXi host where you cannot install anything.
+
+| Tool | Writes? | What it does |
+|---|---|---|
+| `esxi-recon.sh` | no | host triage: IOCs, datastores, pass counts |
+| `babuk_triage.py` | no | classify files, total the surviving plaintext |
+| `babuk_mapdisk.py` | no | rebuild one disk's layout from its backup structures |
+| `babuk_fleetscan.py` | no | the mapper across the whole host, CSV out |
+| `find_fs.py` | no | signature scan when the head is gone entirely |
+| `find-backup-gpt.sh` | no | find the backup GPT on a disk expanded in VMware |
+| `remaining-report.sh` | no | what is left; checks power state before reading |
+| `final-status.sh` | no | per-VM power/tools/IP table |
+| `make-descriptors.sh` / `.py` | creates only | the `-recovered.vmdk` descriptors |
+| `recover-easy-path.sh` | **yes** | the easy path end to end; dry-run by default |
+| `repair-ubuntu-efi.sh` | **yes** | the same by hand, as a worked example |
+| `rebuild-bootable.sh` | **yes** | hard path: reassemble `lost+found` onto a fresh disk |
+| `make-rescue-vm.sh` | **yes** | provision a rescue VM around one disk |
+| `make-batch-rescue-vm.sh` | **yes** | provision one rescue VM around many disks |
+| `batch-repair.sh` | **yes** | drive the repair across every attached disk |
+| `bringup-recovered-vm.sh` | **yes** | repoint the `.vmx`, register, boot |
+| `bringup-sequential.sh` | **yes** | the same for a list, one at a time |
+| `fix-suspended-vms.sh` | **yes** | guests suspended with an encrypted `.vmem` |
+| `esxi_run.py`, `batch_driver.py` | n/a | run things on a host from your workstation |
+| `windows/` | n/a | PowerShell, for password-only access from Windows |
 
 ## Scope
 
 Guest recovery here is written against Ubuntu and Debian, since that is what the
-fleet ran. The disk-level work applies to any guest. Where a VM was Windows, the
+fleets ran. The disk-level work applies to any guest. Where a VM was Windows, the
 notes send you to R-Studio, DMDE or UFS Explorer rather than pretending Linux
 tooling will read a damaged NTFS volume properly.
 
 Hashes, contacts and the attacker's master public key are published on purpose;
 that is what makes an IOC list useful. Host addresses, VM names and credentials
-from the incident are not, for reasons that should be obvious.
+from the incidents are not, for reasons that should be obvious.
 
 There is no malware here and nothing that helps anyone write any. This is the
 other half of the problem: work out what survived, and go get it.
