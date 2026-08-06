@@ -20,6 +20,13 @@ in under ten minutes each.
 
 The rest of this is how.
 
+**What this covers:** ESXi ransomware recovery and VMware ransomware recovery
+end to end, from `.babyk` VMDK recovery on VMFS datastores through GPT partition
+table rebuild, LVM recovery and ext4 recovery inside the guest, plus the
+ransomware incident response steps around all of it (evidence, IOCs, cleaning
+the host). Babuk ransomware and its ESXi descendants specifically, though the
+damage model applies to any locker that stops early in a file.
+
 ---
 
 ## Why 512 MiB matters so much
@@ -193,6 +200,68 @@ Then report the incident, and include the master public key from the binary.
 Every key in that public decryptor exists because someone reported. When an
 actor is eventually arrested and their keys are recovered, victims get matched by
 exactly that value. If yours was never filed, nobody can match it to you.
+
+## Questions people ask at hour one
+
+### Can Babuk ransomware be decrypted?
+
+Not this variant, and almost certainly not yours. Curve25519 ECDH with a
+per-file ephemeral key drawn from `/dev/urandom`, SHA-256 to derive, Sosemanuk
+to encrypt. It is implemented correctly and the master private key sits with the
+attacker. Fifteen Babuk private keys *are* public, from the 2021 source leak plus
+the Tortilla key Cisco Talos recovered, so run the No More Ransom decryptor
+against a copy of one file before you accept that answer. It takes ten minutes.
+
+### What is a .babyk file, and can I open it?
+
+It is one of your files with the first 512 MiB overwritten and 32 bytes of key
+appended. Nothing opens it directly. On a virtual disk, everything past the
+512 MiB mark is still your original data, which is why the recovery works.
+
+### My ESXi VMs won't boot after ransomware. Is the data gone?
+
+Very probably not. What died is the partition table and the bootloader, both of
+which sit in the first megabytes of the disk. The filesystem and your files are
+further in. Follow the [rescue VM guide](docs/rescue-vm-guide.md) and you will
+usually be looking at a directory listing within the hour.
+
+### How do I recover a VMDK encrypted by ransomware?
+
+Generate a fresh descriptor so ESXi will attach the encrypted flat file as an
+ordinary disk, attach it to a rescue VM in non-persistent mode, rebuild the GPT
+from the backup copy at the end of the disk, activate LVM, and mount read-only.
+`tools/make-descriptors.sh` handles the first step for every damaged file on the
+host.
+
+### How do I rebuild a GPT partition table after ransomware?
+
+The primary table at LBA 1 is destroyed, but GPT keeps a full backup in the last
+sector of the disk and `gdisk` restores one from the other:
+`printf '1\nr\nb\nw\nY\n' | gdisk /dev/sda`. The leading `1` answers gdisk's
+"found invalid MBR" prompt. If there is no backup header at all, the disk is
+MBR-partitioned and you want `testdisk` with a deeper search instead.
+
+### How do I recover an LVM volume after ransomware?
+
+If the physical volume starts past 512 MiB, which is normal on an Ubuntu guided
+install, the LVM label and metadata are untouched. `vgscan --mknodes`,
+`vgchange -ay`, `lvs`, then mount. If the rescue environment has no `lvm2`
+installed, the volume shows up as unformatted space and looks exactly like total
+loss. That mistake is the single most common false negative in this work.
+
+### What if ext4 says bad superblock?
+
+The primary superblock at offset 1024 was inside the damage. ext4 keeps backups
+at block groups 1, 3, 5, 7, 9, 25 and so on, but the first two usually sit inside
+the blast radius too. Block 163840 is normally the first usable one:
+`e2fsck -b 163840 -B 4096 /dev/sdaN`. `tools/find_fs.py` will scan and tell you
+rather than making you guess.
+
+### Should I pay?
+
+Nobody can make that call for you, but do the measurement first. Run the triage
+in the section above and find out how much of your data is actually damaged
+before anyone quotes you a price for it. In this case the answer was 0.246%.
 
 ## About the tools
 
