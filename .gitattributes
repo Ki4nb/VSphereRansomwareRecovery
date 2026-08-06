@@ -1,0 +1,9 @@
+# Shell and Python here run on ESXi and on Linux rescue systems. A CRLF line
+# ending in a shebang makes /bin/sh report "not found" for an interpreter that
+# plainly exists, so force LF regardless of the checkout platform.
+*.sh  text eol=lf
+*.py  text eol=lf
+*.md  text eol=lf
+
+# PowerShell runs on the operator's Windows workstation; leave it native.
+*.ps1 text eol=crlf
