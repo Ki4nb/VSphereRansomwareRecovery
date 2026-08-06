@@ -1,0 +1,118 @@
+name: checks
+
+# People clone this mid-incident and run it as root against a hypervisor holding
+# the only copy of their data. A broken script here is not a style problem.
+#
+# The sanitize job matters just as much: git history is permanent, and victim
+# data committed by accident cannot be taken back without rebuilding the repo.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  shell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: syntax
+        run: |
+          fail=0
+          for f in tools/*.sh; do
+            if head -1 "$f" | grep -q bash; then chk="bash -n"; else chk="sh -n"; fi
+            if $chk "$f"; then echo "  ok   $f"; else echo "  FAIL $f"; fail=1; fi
+          done
+          exit $fail
+
+      - name: shellcheck
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+          # -S error only: these run on busybox and in chroots, so plenty of
+          # stylistic warnings are deliberate. Tighten if that stops being true.
+          shellcheck -S error tools/*.sh
+
+      - name: no bashisms in POSIX scripts
+        run: |
+          # Host-side tools run under ESXi's busybox ash. bash is only available
+          # inside a Linux rescue VM, so anything shebanged /bin/sh must stay POSIX.
+          sudo apt-get install -y -qq devscripts
+          fail=0
+          for f in tools/*.sh; do
+            head -1 "$f" | grep -q 'bin/sh' || continue
+            checkbashisms "$f" || fail=1
+          done
+          exit $fail
+
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: compile
+        run: |
+          for f in tools/*.py; do python -m py_compile "$f" && echo "  ok $f"; done
+
+      - name: stdlib only
+        run: |
+          # These run on the ESXi host, where nothing can be installed.
+          if grep -rnE '^\s*(import|from)\s+(paramiko|requests|yaml|numpy|pandas|fabric|scp)\b' tools/*.py; then
+            echo "third-party import found - host-side tools must be stdlib only"
+            exit 1
+          fi
+          echo "  ok"
+
+      - name: entry points resolve
+        run: |
+          python tools/esxi_run.py --help    > /dev/null && echo "  ok esxi_run.py"
+          python tools/batch_driver.py --help > /dev/null && echo "  ok batch_driver.py"
+
+  sanitize:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: no victim data
+        run: |
+          set +e
+          rc=0
+          files="--include=*.md --include=*.sh --include=*.py --include=*.ps1 --include=*.csv --include=*.yml"
+
+          echo "--- routable IPv4 (documentation and private ranges are fine) ---"
+          hits=$(grep -rnoE $files '\b([0-9]{1,3}\.){3}[0-9]{1,3}\b' . \
+            | grep -vE '192\.0\.2\.|198\.51\.100\.|203\.0\.113\.|127\.0\.0\.1|0\.0\.0\.0|255\.255|1\.1\.1\.1|8\.8\.8\.8|(^|[^0-9.])10\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.')
+          [ -n "$hits" ] && { echo "$hits"; rc=1; } || echo "  clean"
+
+          echo "--- MAC addresses (RFC 7042 documentation MACs are fine) ---"
+          hits=$(grep -rnoE $files '([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}' . \
+            | grep -viE '00:00:5[Ee]:00:53')
+          [ -n "$hits" ] && { echo "$hits"; rc=1; } || echo "  clean"
+
+          echo "--- VMFS datastore UUIDs (8-8-4-12); obvious placeholders ignored ---"
+          # Deliberately not matching 8-4-4-4-12: those are GPT partition type
+          # GUIDs and belong in the tools.
+          hits=$(grep -rnoE $files '\b[0-9a-f]{8}-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{12}\b' . \
+            | grep -Pv '(.)\1{3,}')
+          [ -n "$hits" ] && { echo "$hits"; rc=1; } || echo "  clean"
+
+          [ $rc -eq 0 ] || echo "
+          Victim data must not land in git history - it is permanent.
+          See the sanitizing section of CLAUDE.md."
+          exit $rc
+
+      - name: line endings and BOMs
+        run: |
+          # A CRLF or BOM in a shebang makes /bin/sh report "not found" for an
+          # interpreter that is plainly there.
+          rc=0
+          for f in tools/*.sh tools/*.py; do
+            if head -c3 "$f" | grep -q $'\xef\xbb\xbf'; then echo "  BOM: $f"; rc=1; fi
+            if head -1 "$f" | grep -q $'\r';          then echo "  CRLF: $f"; rc=1; fi
+          done
+          [ $rc -eq 0 ] && echo "  clean"
+          exit $rc

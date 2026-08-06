@@ -1,0 +1,34 @@
+# Written by make-batch-rescue-vm.sh next to the batch rescue VM's .vmx, and
+# read by batch-repair.sh inside that rescue VM.
+#
+#   <controller> <unit> <original_bytes> <passes> <vm name>
+#
+# original_bytes is the size with the appended key bytes already subtracted, so
+# it is what the disk will actually report once attached. batch-repair.sh
+# re-checks that figure against the live device before touching anything.
+#
+# The unit numbers skip 7: pvscsi reserves it for the HBA.
+#
+# Two things this file exists to solve:
+#
+#   1. These fleets are clones, so the guests share filesystem UUIDs, LVM volume
+#      group names, LVM VG UUIDs and often hostnames - and most are the same
+#      size. The SCSI address is the only thing that distinguishes them.
+#   2. The Linux SCSI host number is NOT the vmx controller number; the AHCI
+#      controller driving the CD-ROM claims one too. batch-repair.sh therefore
+#      matches each Linux host to a controller by comparing the complete set of
+#      unit:size pairs, and fails closed if no match is found.
+#
+# Never delete a line to skip a guest - that changes the controller's signature
+# and unmatches every disk on it. Mark it instead, by prefixing the name with
+# #SKIP# (batch_driver.py --exclude does this for you).
+
+0 0 107374182400 2 ubuntu-01
+0 1 42949672960 2 ubuntu-02
+0 2 42949672960 2 app-server-01
+0 3 42949672960 1 app server 02
+0 4 32212254720 2 #SKIP#ubuntu-03
+0 5 85899345920 2 db-server-01
+0 6 10737418240 2 template-01
+0 8 42949672960 2 web-01
+1 0 42949672960 2 web-02

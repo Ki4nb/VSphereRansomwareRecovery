@@ -1,0 +1,19 @@
+# VM list for make-batch-rescue-vm.sh and bringup-sequential.sh.
+# One guest per line. Blank lines and #comments are ignored.
+#
+#   sh tools/make-batch-rescue-vm.sh "VM Network" --list vmlist.txt --commit
+#   sh tools/bringup-sequential.sh   "VM Network" --list vmlist.txt --commit
+
+# A bare folder name is resolved across every mounted datastore.
+ubuntu-01
+ubuntu-02
+app-server-01
+
+# Folder names with spaces are fine - no quoting needed, the whole line is used.
+app server 02
+
+# Use a FULL PATH when the same folder name exists on several datastores, which
+# happens whenever one VM has disks spread across them. A bare name would take
+# whichever datastore sorted first, and that is not necessarily the one holding
+# the system disk.
+/vmfs/volumes/<datastore-uuid>/db-server-01

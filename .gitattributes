@@ -4,6 +4,11 @@
 *.sh  text eol=lf
 *.py  text eol=lf
 *.md  text eol=lf
+*.yml text eol=lf
+
+# VM lists and manifests are read line-by-line by shell on the target. A CRLF
+# leaves a trailing \r on every VM name, and the lookups then silently fail.
+*.txt text eol=lf
 
 # PowerShell runs on the operator's Windows workstation; leave it native.
 *.ps1 text eol=crlf

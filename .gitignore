@@ -18,3 +18,9 @@ __pycache__/
 *.py[cod]
 .DS_Store
 .venv/
+
+# Driver scratch
+.manifest.tmp
+vmlist.txt
+manifest.txt
+!examples/*.sample.*
