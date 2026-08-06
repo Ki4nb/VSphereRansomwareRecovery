@@ -1,0 +1,20 @@
+# Never commit incident data. Anything derived from a live engagement —
+# fleet inventories, triage CSVs, disk images, ransom notes, samples — stays
+# out of this repo. Sanitize into docs/ by hand instead.
+evidence/
+samples/
+*.babyk
+*.vmdk
+*.csv
+!examples/*.sample.csv
+
+# Analyst scratch
+*.log
+*.out
+scratch/
+tmp/
+
+__pycache__/
+*.py[cod]
+.DS_Store
+.venv/

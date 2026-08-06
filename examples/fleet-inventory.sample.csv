@@ -1,0 +1,10 @@
+disk,disk_gib,passes,part,type,start,size_gib,intact,fs,detail,sectors
+/vmfs/volumes/<uuid>/app-01/app-01-flat.vmdk.babyk,100.0,2,1,EFI System Partition,1048576,1.05,no (head damaged),,,209715200
+/vmfs/volumes/<uuid>/app-01/app-01-flat.vmdk.babyk,100.0,2,2,Linux filesystem,1128267776,2.00,YES,ext2/3/4,block=4096,209715200
+/vmfs/volumes/<uuid>/app-01/app-01-flat.vmdk.babyk,100.0,2,3,Linux filesystem,3275751424,96.95,YES,LVM2 PV,LABELONE,209715200
+/vmfs/volumes/<uuid>/db-01/db-01-flat.vmdk.babyk,350.0,1,3,Linux LVM,3275751424,348.80,YES,LVM2 PV,LABELONE,734003200
+/vmfs/volumes/<uuid>/legacy-01/legacy-01-flat.vmdk.babyk,25.0,1,2,Linux filesystem,565182464,1.75,YES,ext2/3/4,block=4096,52428800
+/vmfs/volumes/<uuid>/win-fileserver/win-fileserver-flat.vmdk.babyk,2048.0,1,2,Basic data (NTFS/exFAT/FAT),135266304,2047.0,partial,NTFS,$MFT intact via backup VBR,4294967296
+/vmfs/volumes/<uuid>/appliance-01/appliance-01-flat.vmdk.babyk,6.0,1,-,MBR - no backup GPT,-,-,unknown,,testdisk deeper search required,12582912
+/vmfs/volumes/<uuid>/util-01/util-01-flat.vmdk.babyk,80.0,0,1,EFI System Partition,1048576,0.53,YES (never encrypted),,,167772160
+/vmfs/volumes/<uuid>/util-01/util-01-flat.vmdk.babyk,80.0,0,2,Linux filesystem,565182464,79.4,YES (never encrypted),ext2/3/4,block=4096,167772160
